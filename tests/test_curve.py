@@ -14,7 +14,7 @@ from comfy.model_patcher import ModelPatcher
 from hyperflow_h3.curve import (file_hash, install_curve_refit, matching_fit,
                                 table_lookup)
 from hyperflow_h3.nodes import ApplyHyperFlowH3, ApplyHyperFlowH3Advanced
-from hyperflow_h3.schedule import DEFAULT_SIGMAS_8STEP, video_schedule_sigmas
+from hyperflow_h3.schedule import DEFAULT_SIGMAS_8STEP, is_grid_slice, video_schedule_sigmas
 from test_embedder import _FakePatcher
 
 
@@ -264,3 +264,73 @@ def test_curve_rejects_double_install():
     install_curve_refit(patcher, fit)
     with pytest.raises(RuntimeError, match="already has HyperFlow"):
         install_curve_refit(patcher, fit)
+
+
+def _slice_run(sigmas, steps, caplog):
+    """Run one forward per step of `sigmas`; return the per-step final-layer embedding rows."""
+    dm, (data, meta), grid = fixture()
+    captured = {}
+    final = dm.final_layer.forward
+
+    def capture_final(x, emb, video, audio, *args, **kwargs):
+        captured["final"] = (emb, video, audio)
+        return final(x, emb, video, audio, *args, **kwargs)
+
+    dm.final_layer.forward = capture_final
+    patcher = _FakePatcher(dm)
+    install_curve_refit(patcher, (data, meta))
+    for key, value in patcher.object_patches.items():
+        comfy.utils.set_attr(dm, key.removeprefix("diffusion_model."), value)
+    video, audio = torch.randn(1, 1, 1, 2, 4), torch.randn(1, 2, 2, 1)
+    payload = {"text_token_tags": torch.tensor([0, 2]),
+               "visual_cond_noise_aug": 0., "audio_cond_noise_aug": 0.}
+    rows = []
+    for sigma in sigmas[:-1]:
+        patcher.wrappers[0](dm._forward, [video, audio], sigma.reshape(1) * 1000.,
+                            torch.randn(1, 2, 12), {"sample_sigmas": sigmas}, minimax_payload=payload)
+        emb, v, a = captured["final"]
+        rows.append((emb[v[2]].clone(), emb[a[2]].clone()))
+    return data, rows
+
+
+@pytest.mark.parametrize("start,stop", [(0, 9), (0, 4), (2, 9), (3, 7), (7, 9)])
+def test_contiguous_grid_slices_keep_the_curve_active(start, stop, caplog):
+    grid = video_schedule_sigmas(None)
+    data, rows = _slice_run(grid[start:stop], stop - start - 1, caplog)
+    assert len(rows) == stop - start - 1
+    for j, (video_row, audio_row) in enumerate(rows):
+        torch.testing.assert_close(video_row, data["generated"][start + j])
+        torch.testing.assert_close(audio_row, data["generated"][8 + start + j])
+    assert not any("curve refit disabled" in r.message for r in caplog.records)
+    assert not any("not the trained" in r.message for r in caplog.records)
+
+
+@pytest.mark.parametrize("picked", [[0, 2, 3, 4], [0, 1, 3, 8], [8, 7, 6]])
+def test_non_contiguous_sigmas_stay_backbone_only(picked, caplog):
+    grid = video_schedule_sigmas(None)
+    dm, fit, _ = fixture()
+    sigmas = grid[picked]
+    assert not is_grid_slice(sigmas, grid)
+    original = copy.deepcopy(dm)
+    patcher = _FakePatcher(dm)
+    install_curve_refit(patcher, fit)
+    for key, value in patcher.object_patches.items():
+        comfy.utils.set_attr(dm, key.removeprefix("diffusion_model."), value)
+    x = [torch.randn(1, 1, 1, 2, 4), torch.randn(1, 2, 2, 1)]
+    text = torch.randn(1, 2, 12)
+    timestep = sigmas[0].reshape(1) * 1000.
+    want = original._forward(x, timestep, text, {"sample_sigmas": sigmas})
+    got = patcher.wrappers[0](dm._forward, x, timestep, text, {"sample_sigmas": sigmas})
+    assert all(torch.equal(a, b) for a, b in zip(got, want))
+    assert sum("curve refit disabled" in r.message for r in caplog.records) == 1
+
+
+def test_is_grid_slice_edges():
+    grid = video_schedule_sigmas(None)
+    assert is_grid_slice(grid, grid)
+    assert is_grid_slice(grid[2:], grid)
+    assert is_grid_slice(grid[3:5], grid)
+    assert not is_grid_slice(grid[:1], grid)
+    assert not is_grid_slice(torch.cat((grid, grid[-1:])), grid)
+    assert not is_grid_slice(grid[2:] + 1e-3, grid)
+    assert is_grid_slice(grid[2:] + 1e-6, grid, atol=1e-4)

@@ -15,7 +15,7 @@ import folder_paths
 from comfy.patcher_extension import WrappersMP
 from .embedder import (time_pairs, make_block_forward, make_final_forward,
                                    make_ctx_wrapper, _unwrap_two_time)
-from .schedule import video_schedule_sigmas
+from .schedule import is_grid_slice, video_schedule_sigmas
 
 _log = logging.getLogger("comfy.hyperflow")
 FIT_DIRECTORY = Path(__file__).resolve().parents[1] / "assets" / "curve_fits"
@@ -179,8 +179,7 @@ def install_curve_refit(model, fit, verbose=False):
         options = args[3] if len(args) > 3 else kwargs.get("transformer_options", {})
         options = options or {}
         sigmas = options.get("sample_sigmas")
-        valid = (sigmas is not None and sigmas.shape == grid.shape
-                 and torch.equal(sigmas.cpu().float(), grid)
+        valid = (sigmas is not None and is_grid_slice(sigmas, grid)
                  and float(options.get("minimax_h3_sigma_shift_video", dm.sigma_shift_video)) == float(meta["video_shift"])
                  and float(options.get("minimax_h3_sigma_shift_audio", dm.sigma_shift_audio)) == float(meta["audio_shift"]))
         if not valid:
