@@ -43,7 +43,7 @@ from comfy.ldm.minimax.model import (AUDIO_COND_TIMESTEP, VISUAL_COND_TIMESTEP,
                                      time_shift_sigma)
 from comfy.patcher_extension import WrappersMP
 
-from .schedule import video_schedule_sigmas
+from .schedule import is_grid_slice, video_schedule_sigmas
 
 _log = logging.getLogger("comfy.hyperflow")
 
@@ -257,12 +257,12 @@ def make_ctx_wrapper(shared, dm, grid, label, verbose):
         else:
             if not warned["grid"]:
                 warned["grid"] = True
-                ss = sample_sigmas.flatten().cpu()
-                if ss.numel() != grid.numel() or not torch.allclose(ss, grid, atol=1e-4):
+                if not is_grid_slice(sample_sigmas, grid, atol=1e-4):
                     _log.warning(
                         "[hyperflow] the sampler sigmas (%d points) are not the "
-                        "trained 8-step grid; the adapter was distilled on its "
-                        "fixed grid -- output quality may deviate.", ss.numel())
+                        "trained 8-step grid or a contiguous slice of it; the "
+                        "adapter was distilled on its fixed grid -- output "
+                        "quality may deviate.", sample_sigmas.numel())
             i = int((sample_sigmas - sigma_v).abs().argmin())
             sigma_next = sample_sigmas[min(i + 1, sample_sigmas.shape[0] - 1)]
         r_v = float(1.0 - sigma_next)

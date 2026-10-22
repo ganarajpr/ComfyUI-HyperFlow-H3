@@ -60,3 +60,22 @@ def video_schedule_sigmas(raw: Sequence[float] | torch.Tensor | None) -> torch.T
 
 __all__ = ["AUDIO_SHIFT", "DEFAULT_SIGMAS_8STEP", "VIDEO_SHIFT",
            "shift_sigmas", "validate_sigmas", "video_schedule_sigmas"]
+
+
+def is_grid_slice(sigmas: torch.Tensor, grid: torch.Tensor, atol: float = 0.0) -> bool:
+    """True when `sigmas` equals a contiguous run of at least 2 points of `grid`.
+
+    Every step of such a run is one of the trained (t, r) intervals, so a grid
+    tail (dual sampling) or head (early stop) is still on-recipe. atol=0 is the
+    exact float comparison the curve refit needs; a full-length run is a slice.
+    """
+    sigmas = sigmas.flatten().cpu().float()
+    grid = grid.flatten().cpu().float()
+    n, m = sigmas.numel(), grid.numel()
+    if n < 2 or n > m:
+        return False
+    for start in range(m - n + 1):
+        window = grid[start:start + n]
+        if torch.equal(sigmas, window) if atol == 0.0 else torch.allclose(sigmas, window, atol=atol):
+            return True
+    return False
