@@ -27,12 +27,39 @@ def fit_directories():
     return [Path(p) / "curve_fits" for p in folder_paths.get_folder_paths("hyperflow")] + [FIT_DIRECTORY]
 
 
+def _hash_cache_path():
+    return Path(folder_paths.get_user_directory()) / "hyperflow_sha256_cache.json"
+
+
+def _load_hash_cache():
+    try:
+        entries = json.loads(_hash_cache_path().read_text())
+        return {(e["path"], e["size"], e["mtime_ns"]): e["sha256"] for e in entries}
+    except (OSError, ValueError, TypeError, KeyError):
+        return {}
+
+
+def _save_hash_cache():
+    entries = [{"path": p, "size": s, "mtime_ns": m, "sha256": h} for (p, s, m), h in _hashes.items()]
+    try:
+        tmp = _hash_cache_path().with_suffix(".tmp")
+        tmp.write_text(json.dumps(entries, indent=1))
+        os.replace(tmp, _hash_cache_path())
+    except OSError as exc:
+        _log.warning("[hyperflow] could not persist checkpoint hash cache: %s", exc)
+
+
 def file_hash(path):
+    """sha256 of a checkpoint, cached on disk by (path, size, mtime) so a ComfyUI
+    restart does not re-read a 20 GB base (~11 s) on the first job."""
     stat = os.stat(path)
     key = (str(path), stat.st_size, stat.st_mtime_ns)
+    if not _hashes:
+        _hashes.update(_load_hash_cache())
     if key not in _hashes:
         with open(path, "rb") as handle:
             _hashes[key] = hashlib.file_digest(handle, "sha256").hexdigest()
+        _save_hash_cache()
     return _hashes[key]
 
 
